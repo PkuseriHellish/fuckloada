@@ -35,15 +35,15 @@ val pluginLoaderPatch = bytecodePatch(
     extendWith("extensions/extension.mpe")
 
     execute {
-        // UNVERIFIED PIECE #1 (bigger unknown than #2 below): whether manifest
-        // access via document(...) is available directly in this patch's
-        // execute block, or whether it needs `dependsOn` on a separate resource
-        // patch first so the manifest is decoded before this runs. Check
-        // against a real Morphe resource-editing patch (e.g. anything in
-        // morphe-patches that edits AndroidManifest.xml) before trusting this
-        // line to even compile.
-        val applicationClassName = document("AndroidManifest.xml").use { doc ->
-            val applicationElement = doc.getElementsByTagName("application").item(0) as? Element
+        // Manifest access is a property of resourceContext, not a bare
+        // top-level document(...) call - confirmed against a real, current
+        // Morphe patch (MorpheApp/morphe-patches commit fb25ff1, "PoToken
+        // provider") that reads/writes AndroidManifest.xml from inside the
+        // same execute block that also does bytecode work, the same shape
+        // as this patch. `document` there is a plain org.w3c.dom.Document
+        // directly, no extra unwrapping needed.
+        val applicationClassName = resourceContext.document("AndroidManifest.xml").use { document ->
+            val applicationElement = document.getElementsByTagName("application").item(0) as? Element
                 ?: throw PatchException("No <application> element found in AndroidManifest.xml")
             applicationElement.getAttributeNode("android:name")?.value
         }
@@ -61,16 +61,20 @@ val pluginLoaderPatch = bytecodePatch(
         val applicationDescriptor = "L" +
             applicationClassName.trimStart('.').replace('.', '/') + ";"
 
-        val applicationClass = classDefByOrNull(applicationDescriptor)
+        val applicationClassDef = classDefByOrNull(applicationDescriptor)
             ?: throw PatchException("Could not find class $applicationDescriptor in the APK")
 
-        val constructor = applicationClass.methods.firstOrNull { it.name == "<init>" }
+        // classDefByOrNull hands back an IMMUTABLE ClassDef - its methods
+        // can't be edited. mutableClassDefBy(...) gets the mutable proxy for
+        // the same class, whose methods are MutableMethod and can actually
+        // be modified (this is the fix for the addInstruction receiver-type
+        // error - it needs a MutableMethod, not a plain Method).
+        val mutableApplicationClass = mutableClassDefBy(applicationClassDef)
+
+        val constructor = mutableApplicationClass.methods.firstOrNull { it.name == "<init>" }
             ?: throw PatchException("$applicationDescriptor has no <init> method")
 
-        val implementation = constructor.implementation
-            ?: throw PatchException("$applicationDescriptor's <init> has no implementation")
-
-        // UNVERIFIED PIECE #2 (same category of risk as WebhookButtonPatch.kt's
+        // UNVERIFIED PIECE (same category of risk as WebhookButtonPatch.kt's
         // known-unverified hook): assumes the call to the superclass
         // constructor is an invoke-direct ending in <init>()V, that inserting
         // right after it is safe, and that v0 is a free register at that
@@ -78,7 +82,7 @@ val pluginLoaderPatch = bytecodePatch(
         // compiled bytecode - this needs a fresh build-and-check per app, the
         // same way the Twitter hook did. If the build fails with a verifier
         // error here, that's the first place to look.
-        val superCallIndex = implementation.instructions.indexOfFirst {
+        val superCallIndex = constructor.instructions.indexOfFirst {
             it.opcode == Opcode.INVOKE_DIRECT &&
                 (it as? ReferenceInstruction)?.reference?.toString()?.endsWith("<init>()V") == true
         }
