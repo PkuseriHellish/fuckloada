@@ -13,6 +13,7 @@ jobs:
       id-token: write
       attestations: write
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -25,15 +26,6 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 'lts/*'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm install
-
       # Semantic release runs its own Gradle build command.
       # Only dev and main branch will generate a release as specified by .releaserc
       - name: Release
@@ -42,6 +34,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # If a release was published, the release build has already produced the .mpp.
+      # Otherwise, explicitly build the project.
+      - name: Verify project compiles
+        if: steps.release.outputs.new_release_published != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./gradlew :patches:buildAndroid clean --no-daemon
+
       - name: Attest
         if: steps.release.outputs.new_release_published == 'true'
         uses: actions/attest-build-provenance@v4
@@ -49,19 +49,12 @@ jobs:
           subject-name: 'Morphe Patches ${{ steps.release.outputs.new_release_git_tag }}'
           subject-path: patches/build/libs/patches-*.mpp
 
-      - name: Upload release artifact
-        if: steps.release.outputs.new_release_published == 'true'
+      # Upload the generated .mpp on EVERY successful run,
+      # regardless of whether semantic-release created a release.
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: morphe-patches-${{ steps.release.outputs.new_release_git_tag }}
+          name: morphe-patches-${{ github.sha }}
           path: patches/build/libs/patches-*.mpp
           if-no-files-found: error
           retention-days: 30
-
-      # Always verify compilation when semantic-release did not publish a release.
-      # This covers non-main/dev branches, chore commits, docs commits, etc.
-      - name: Verify project compiles
-        if: steps.release.outputs.new_release_published != 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./gradlew :patches:buildAndroid clean --no-daemon
