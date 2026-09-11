@@ -49,6 +49,15 @@ jobs:
           subject-name: 'Morphe Patches ${{ steps.release.outputs.new_release_git_tag }}'
           subject-path: patches/build/libs/patches-*.mpp
 
+      - name: Upload release artifact
+        if: steps.release.outputs.new_release_published == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: morphe-patches-${{ steps.release.outputs.new_release_git_tag }}
+          path: patches/build/libs/patches-*.mpp
+          if-no-files-found: error
+          retention-days: 30
+
       # Always verify compilation when semantic-release did not publish a release.
       # This covers non-main/dev branches, chore commits, docs commits, etc.
       - name: Verify project compiles
