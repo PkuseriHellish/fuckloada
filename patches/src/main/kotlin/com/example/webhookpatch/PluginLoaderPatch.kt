@@ -1,55 +1,83 @@
 package com.example.webhookpatch
 
-import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.instructions
 import app.morphe.patcher.patch.PatchException
 import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.patch.resourcePatch
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
+import org.w3c.dom.Element
 
-// Fill this in per app: the Application subclass name from that app's
-// AndroidManifest.xml (<application android:name="...">). This is plain,
-// unobfuscated text - no fingerprinting or reverse-engineering needed to
-// find it, just unzip the target APK and check AndroidManifest.xml, or
-// run `aapt dump badging app.apk | grep application:`.
-//
-// This is the one per-app manual step this patch couldn't automate away:
-// two earlier attempts at reading it straight out of the manifest inside
-// this patch (via a guessed document(...) call, then a guessed
-// resourceContext.document(...) call) both failed to even compile, and
-// rather than guess a third unverified API surface, this trades the
-// automation for using only what's confirmed working in the bundled
-// ExamplePatch.kt/Fingerprints.kt in this same template.
-private const val APPLICATION_CLASS = "Lcom/example/SomeApp;" // TODO: fill in per app
+// Confirmed against the real morphe-patcher 1.13.0 source (not guessed):
+// ResourcePatchContext.document(path) exists ONLY on ResourcePatchContext,
+// never on BytecodePatchContext - which is exactly why both earlier attempts
+// (document(...), then resourceContext.document(...)) failed to compile from
+// inside a bytecodePatch's execute block. The fix is two patches: a small
+// resource patch reads the manifest, the bytecode patch (dependsOn it) does
+// the hook, and they share one value via this module-level var. dependsOn(...)
+// guarantees the resource patch's execute runs first.
+private var applicationClassName: String? = null
 
 private const val LOADER_CLASS = "Lcom/example/webhookpatch/loader/PatchLoader;"
 private const val HOOK_NAME = "app.launch"
 
-// Same shape as Fingerprints.kt's AdLoaderFingerprint: definingClass can be
-// a full, non-obfuscated class descriptor directly, per that file's own
-// comment on StringComparisonType. No filters needed - <init> is a unique
-// method name within its own defining class.
-private object ApplicationConstructorFingerprint : Fingerprint(
-    definingClass = APPLICATION_CLASS,
-    name = "<init>",
-)
+// Internal (name = null): not shown in Morphe Manager's patch list, but
+// required for pluginLoaderPatch below to function. Same convention as this
+// template's own internalPatch in InternalPatch.kt.
+private val readApplicationClassNamePatch = resourcePatch {
+    execute {
+        // document(...) here is ResourcePatchContext.document - confirmed
+        // real, returns a Document that IS a org.w3c.dom.Document (via `by`
+        // delegation) and IS Closeable, so .use{} is correct and needs no
+        // further unwrapping (no .file property, unlike very old ReVanced).
+        applicationClassName = document("AndroidManifest.xml").use { document ->
+            val applicationElement = document.getElementsByTagName("application").item(0) as? Element
+                ?: throw PatchException("No <application> element found in AndroidManifest.xml")
+            applicationElement.getAttributeNode("android:name")?.value
+        }
+    }
+}
 
 @Suppress("unused")
 val pluginLoaderPatch = bytecodePatch(
     name = "Generic plugin loader",
     description = "Hooks this app's Application class once and dispatches to a " +
-        "generic, hot-swappable plugin loader (see plugin-loader repo). Set " +
-        "APPLICATION_CLASS in PluginLoaderPatch.kt to the target app's declared " +
-        "Application class before building.",
+        "generic, hot-swappable plugin loader (see plugin-loader repo). No app " +
+        "restriction, no per-app constant to fill in - the Application class " +
+        "name is read from the manifest automatically.",
 ) {
+    dependsOn(readApplicationClassNamePatch)
     extendWith("extensions/extension.mpe")
 
     execute {
-        val constructor = ApplicationConstructorFingerprint.method
+        val className = applicationClassName
+        if (className.isNullOrEmpty()) {
+            throw PatchException(
+                "This app doesn't declare a custom Application class, so there's no " +
+                    "constructor here to hook. Pick a different hook point for this " +
+                    "app instead - see plugin-loader/README.md."
+            )
+        }
+
+        // "com.example.SomeApp" -> "Lcom/example/SomeApp;"
+        val applicationDescriptor = "L" + className.trimStart('.').replace('.', '/') + ";"
+
+        // classDefByOrNull / mutableClassDefBy: confirmed exact signatures
+        // from BytecodePatchContext.kt in the real source. classDefByOrNull
+        // hands back an IMMUTABLE ClassDef; mutableClassDefBy(classDef) gets
+        // the mutable proxy whose methods are MutableMethod and can actually
+        // be edited (this is what addInstruction needs as its receiver).
+        val classDef = classDefByOrNull(applicationDescriptor)
+            ?: throw PatchException("Could not find class $applicationDescriptor in the APK")
+
+        val mutableClass = mutableClassDefBy(classDef)
+
+        val constructor = mutableClass.methods.firstOrNull { it.name == "<init>" }
+            ?: throw PatchException("$applicationDescriptor has no <init> method")
 
         // UNVERIFIED PIECE (same category of risk as WebhookButtonPatch.kt's
-        // known-unverified hook, and the only piece left that genuinely can't
+        // known-unverified hook, and the one thing left that genuinely can't
         // be checked without your actual APK): assumes the call to the
         // superclass constructor is an invoke-direct ending in <init>()V,
         // that inserting right after it is safe, and that v0 is a free
@@ -62,7 +90,7 @@ val pluginLoaderPatch = bytecodePatch(
         }
         if (superCallIndex == -1) {
             throw PatchException(
-                "Could not find a no-arg super() call in $APPLICATION_CLASS's " +
+                "Could not find a no-arg super() call in $applicationDescriptor's " +
                     "constructor - it may take constructor arguments, in which case " +
                     "this simple insert-after-super approach won't work as-is."
             )

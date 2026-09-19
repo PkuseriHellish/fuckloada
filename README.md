@@ -39,42 +39,48 @@ not for plugin logic changes, and not for per-app hook changes either
 ./gradlew :patches:buildAndroid --no-daemon
 ```
 
-## Included: a universal hook (`PluginLoaderPatch.kt`)
+## Included: an automatic hook (`PluginLoaderPatch.kt`)
 
 ```
 patches/src/main/kotlin/com/example/webhookpatch/
-└── PluginLoaderPatch.kt   - selectable against ANY app, no fingerprinting
+└── PluginLoaderPatch.kt   - two patches: reads the manifest, then hooks
 ```
 
-This declares no `compatibleWith(...)`, so Morphe Manager will let you add
-it to whatever app you pick. Instead of fingerprinting some app-specific
-UI class the way `webhookbutton-plugin`'s hook does for Twitter, it reads
-the app's own declared `Application` class name straight out of
-`AndroidManifest.xml` (plaintext, no reverse-engineering needed) and
-inserts the `dispatch(...)` call right after that class's `super()` call.
+This declares no `compatibleWith(...)` restriction, so Morphe Manager
+will let you add it to whatever app you pick, and there's no per-app
+constant to fill in - it reads the target app's declared `Application`
+class name straight out of `AndroidManifest.xml` automatically.
 
-**This is the least-effort hook point, not a guaranteed one.** Two
-pieces are explicitly flagged unverified in the source itself:
+Getting the manifest read working took three tries, worth documenting
+here in case this ever needs revisiting: `document(...)` (for reading
+`AndroidManifest.xml`) only exists on `ResourcePatchContext`, never on
+`BytecodePatchContext` - confirmed by reading the actual pinned
+`morphe-patcher` version's source, not by guessing. So this file is
+actually two patches:
 
-1. Whether manifest access is available directly in this patch's
-   `execute` block or needs a `dependsOn` on a separate resource patch -
-   check against a real Morphe manifest-editing patch before assuming
-   this compiles as written.
-2. Whether inserting right after the `super()` call is register-safe for
-   a *given* app's constructor - this is a fresh build-and-check per app,
-   same as the known-unverified register note in `webhookbutton-plugin`'s
-   Twitter hook.
+1. An internal `resourcePatch` (not shown in Manager's patch list) that
+   reads the manifest and stashes the class name in a shared variable.
+2. The real `bytecodePatch`, which `dependsOn(...)` patch 1 (guaranteeing
+   it runs first) and does the actual hook: find that class, get its
+   `<init>`, insert the `dispatch(...)` call right after `super()`.
+
+**One piece is still genuinely unverified and can't be checked without
+your actual APK:** whether inserting right after the `super()` call is
+register-safe for a *given* app's constructor. This is a fresh
+build-and-check per app, same as the known-unverified register note in
+`webhookbutton-plugin`'s Twitter hook. If the build fails with a
+verifier error, that's the first place to look - paste the error and
+the constructor's smali and it's a quick fix from there.
 
 It also simply won't apply to apps that don't declare a custom
-`Application` subclass (the patch throws a clear `PatchException` in
-that case) - you'd pick a different hook point for those, the same way
-you would have had to without this patch at all.
+`Application` subclass - you'd pick a different hook point for those
+(see below), the same way you would have had to without this patch at
+all.
 
 Build and test against one real app first. Once it works for that app,
 you never repatch it again for a new feature idea - only plugin `.dex`
-edits from then on. A different app is still a new hook to verify, just
-a much smaller one (a manifest lookup + one insert) than fingerprinting
-a UI class from scratch.
+edits from then on. A different app just needs this same patch selected
+again in Manager - no new constant, no new fingerprinting.
 
 ## Writing your own hook for a new app
 
